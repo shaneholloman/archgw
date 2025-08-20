@@ -1,63 +1,145 @@
 # hermesllm
 
-A Rust library for translating LLM (Large Language Model) API requests and responses between Mistral, Groq, Gemini, Deepseek, OpenAI, and other provider-compliant formats.
+A Rust library for handling LLM (Large Language Model) API requests and responses with unified abstractions across multiple providers.
 
 ## Features
 
-- Unified types for chat completions and model metadata across multiple LLM providers
-- Builder-pattern API for constructing requests in an idiomatic Rust style
-- Easy conversion between provider formats
-- Streaming and non-streaming response support
+- Unified request/response types with provider-specific parsing
+- Support for both streaming and non-streaming responses
+- Type-safe provider identification
+- OpenAI-compatible API structure with extensible provider support
 
 ## Supported Providers
 
-- Mistral
-- Deepseek
-- Groq
-- Gemini
 - OpenAI
+- Mistral
+- Groq
+- Deepseek
+- Gemini
 - Claude
-- Github
+- GitHub
 
 ## Installation
 
-Add the following to your `Cargo.toml`:
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hermesllm = { git = "https://github.com/katanemo/archgw", subdir = "crates/hermesllm" }
+hermesllm = { path = "../hermesllm" }  # or appropriate path in workspace
 ```
-
-_Replace the path with the appropriate location if using as a workspace member or published crate._
 
 ## Usage
 
-Construct a chat completion request using the builder pattern:
+### Basic Request Parsing
 
 ```rust
-use hermesllm::Provider;
-use hermesllm::providers::openai::types::ChatCompletionsRequest;
+use hermesllm::providers::{ProviderRequestType, ProviderRequest, ProviderId};
 
-let request = ChatCompletionsRequest::builder("gpt-3.5-turbo", vec![Message::new("Hi".to_string())])
-    .build()
-    .expect("Failed to build OpenAIRequest");
+// Parse request from JSON bytes
+let request_bytes = r#"{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}"#;
 
-// Convert to bytes for a specific provider
-let bytes = request.to_bytes(Provider::OpenAI)?;
+// Parse with provider context
+let request = ProviderRequestType::try_from((request_bytes.as_bytes(), &ProviderId::OpenAI))?;
+
+// Access request properties
+println!("Model: {}", request.model());
+println!("User message: {:?}", request.get_recent_user_message());
+println!("Is streaming: {}", request.is_streaming());
 ```
 
-## API Overview
+### Working with Responses
 
-- `Provider`: Enum listing all supported LLM providers.
-- `ChatCompletionsRequest`: Builder-pattern struct for creating chat completion requests.
-- `ChatCompletionsResponse`: Struct for parsing responses.
-- Streaming support via `SseChatCompletionIter`.
-- Error handling via `OpenAIError`.
+```rust
+use hermesllm::providers::{ProviderResponseType, ProviderResponse};
 
-## Contributing
+// Parse response from provider
+let response_bytes = /* JSON response from LLM */;
+let response = ProviderResponseType::try_from((response_bytes, ProviderId::OpenAI))?;
 
-Contributions are welcome! Please open issues or pull requests for bug fixes, new features, or provider integrations.
+// Extract token usage
+if let Some((prompt, completion, total)) = response.extract_usage_counts() {
+    println!("Tokens used: {}/{}/{}", prompt, completion, total);
+}
+```
+
+### Handling Streaming Responses
+
+```rust
+use hermesllm::providers::{ProviderStreamResponseIter, ProviderStreamResponse};
+
+// Create streaming iterator from SSE data
+let sse_data = /* Server-Sent Events data */;
+let mut stream = ProviderStreamResponseIter::try_from((sse_data, &ProviderId::OpenAI))?;
+
+// Process streaming chunks
+for chunk_result in stream {
+    match chunk_result {
+        Ok(chunk) => {
+            if let Some(content) = chunk.content_delta() {
+                print!("{}", content);
+            }
+            if chunk.is_final() {
+                break;
+            }
+        }
+        Err(e) => eprintln!("Stream error: {}", e),
+    }
+}
+```
+
+### Provider Compatibility
+
+```rust
+use hermesllm::providers::{ProviderId, has_compatible_api, supported_apis};
+
+// Check API compatibility
+let provider = ProviderId::Groq;
+if has_compatible_api(&provider, "/v1/chat/completions") {
+    println!("Provider supports chat completions");
+}
+
+// List supported APIs
+let apis = supported_apis(&provider);
+println!("Supported APIs: {:?}", apis);
+```
+
+## Core Types
+
+### Provider Types
+- `ProviderId` - Enum identifying supported providers (OpenAI, Mistral, Groq, etc.)
+- `ProviderRequestType` - Enum wrapping provider-specific request types
+- `ProviderResponseType` - Enum wrapping provider-specific response types
+- `ProviderStreamResponseIter` - Iterator for streaming response chunks
+
+### Traits
+- `ProviderRequest` - Common interface for all request types
+- `ProviderResponse` - Common interface for all response types
+- `ProviderStreamResponse` - Interface for streaming response chunks
+- `TokenUsage` - Interface for token usage information
+
+### OpenAI API Types
+- `ChatCompletionsRequest` - Chat completion request structure
+- `ChatCompletionsResponse` - Chat completion response structure
+- `Message`, `Role`, `MessageContent` - Message building blocks
+
+## Architecture
+
+The library uses a type-safe enum-based approach that:
+
+- **Provides Type Safety**: All provider operations are checked at compile time
+- **Enables Runtime Provider Selection**: Provider can be determined from request headers or config
+- **Maintains Clean Abstractions**: Common traits hide provider-specific details
+- **Supports Extensibility**: New providers can be added by extending the enums
+
+All requests are parsed into a common `ProviderRequestType` enum which implements the `ProviderRequest` trait, allowing uniform access to request properties regardless of the underlying provider format.
+
+## Examples
+
+See the `src/lib.rs` tests for complete working examples of:
+- Parsing requests with provider context
+- Handling streaming responses
+- Working with token usage information
 
 ## License
 
-This project is licensed under the terms of the [MIT License](../LICENSE).
+This project is licensed under the MIT License.
