@@ -26,12 +26,13 @@ _Arch is a smart proxy server designed as a modular edge and AI gateway for agen
 # Overview
 <a href="https://www.producthunt.com/posts/arch-3?embed=true&utm_source=badge-top-post-badge&utm_medium=badge&utm_souce=badge-arch&#0045;3" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=565761&theme=dark&period=daily&t=1742359429995" alt="Arch - Build&#0032;fast&#0044;&#0032;hyper&#0045;personalized&#0032;agents&#0032;with&#0032;intelligent&#0032;infra | Product Hunt" style="width: 188px; height: 41px;" width="188" height="41" /></a>
 
-AI demos are easy to hack. But once you move past the prototype stage, you’re stuck building and maintaining low-level plumbing code that slows down real innovation. For example:
+AI demos are easy to hack. But once you move past a prototype, you’re stuck building and maintaining low-level plumbing code that slows down real innovation. For example:
 
 - **Routing & orchestration.** Frameworks handle routing and handoffs in tightly coupled ways, so if you want to plug in your own router, planner, or policy engine, you’re stuck with a heavy refactor or brittle overrides.
 - **Model integration churn.** Frameworks wire LLM integrations directly into code abstractions, making it hard to add or swap models without touching application code — meaning you’ll have to do codewide search/replace every time you want to experiment with a new model or version.
 - **Observability & governance.** Logging, tracing, and guardrails are baked in as tightly coupled features, so bringing in best-of-breed solutions is painful and often requires digging through the guts of a framework.
 - **Prompt engineering overhead**. Input validation, clarifying vague user input, and coercing outputs into the right schema all pile up, turning what should be design work into low-level plumbing work.
+- **Brittle upgrades**. Every change (new model, new guardrail, new trace format) means patching and redeploying application servers. Contrast that with bouncing a central proxy—one upgrade, instantly consistent everywhere.
 
 With Arch, you can move faster by focusing on higher-level objectives in a language and framework agnostic way. **Arch** was built by the contributors of [Envoy Proxy](https://www.envoyproxy.io/) with the belief that:
 
