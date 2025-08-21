@@ -64,7 +64,7 @@ To get in touch with us, please join our [discord server](https://discord.gg/pGZ
 
 ## Quickstart
 
-Follow this quickstart guide to use arch gateway to build a simple AI agent. Laster in the section we will see how you can Arch Gateway to manage access keys, provide unified access to upstream LLMs and to provide e2e observability.
+Follow this quickstart guide to use Arch as a router for local or hosted LLMs, including dynamic routing. Later in the section we will see how you can Arch to build highly capable agentic applications, and to provide e2e observability.
 
 ### Prerequisites
 
