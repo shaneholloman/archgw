@@ -28,7 +28,7 @@ _Arch is a smart proxy server designed as a modular edge and AI gateway for agen
 
 AI demos are easy to hack. But once you move past a prototype, you’re stuck building and maintaining low-level plumbing code that slows down real innovation. For example:
 
-- **Routing & orchestration.** Put routing in code and you’ve got two choices: maintain it yourself or live with a framework’s baked-in logic. Either way, keeping routing consistent means pushing code changes across all your agents and services, slowing iteration and turning every policy tweak into a refactor instead of a config flip.
+- **Routing & orchestration.** Put routing in code and you’ve got two choices: maintain it yourself or live with a framework’s baked-in logic. Either way, keeping routing consistent means pushing code changes across all your agents, slowing iteration and turning every policy tweak into a refactor instead of a config flip.
 - **Model integration churn.** Frameworks wire LLM integrations directly into code abstractions, making it hard to add or swap models without touching application code — meaning you’ll have to do codewide search/replace every time you want to experiment with a new model or version.
 - **Observability & governance.** Logging, tracing, and guardrails are baked in as tightly coupled features, so bringing in best-of-breed solutions is painful and often requires digging through the guts of a framework.
 - **Prompt engineering overhead**. Input validation, clarifying vague user input, and coercing outputs into the right schema all pile up, turning what should be design work into low-level plumbing work.
