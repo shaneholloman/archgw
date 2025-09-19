@@ -167,6 +167,12 @@ pub enum LlmProviderType {
     OpenAI,
     #[serde(rename = "gemini")]
     Gemini,
+    #[serde(rename = "xai")]
+    XAI,
+    #[serde(rename = "together_ai")]
+    TogetherAI,
+    #[serde(rename = "azure_openai")]
+    AzureOpenAI,
 }
 
 impl Display for LlmProviderType {
@@ -179,6 +185,9 @@ impl Display for LlmProviderType {
             LlmProviderType::Gemini => write!(f, "gemini"),
             LlmProviderType::Mistral => write!(f, "mistral"),
             LlmProviderType::OpenAI => write!(f, "openai"),
+            LlmProviderType::XAI => write!(f, "xai"),
+            LlmProviderType::TogetherAI => write!(f, "together_ai"),
+            LlmProviderType::AzureOpenAI => write!(f, "azure_openai"),
         }
     }
 }
@@ -217,6 +226,7 @@ pub struct LlmProvider {
     pub rate_limits: Option<LlmRatelimit>,
     pub usage: Option<String>,
     pub routing_preferences: Option<Vec<RoutingPreference>>,
+    pub cluster_name: Option<String>,
 }
 
 pub trait IntoModels {
@@ -256,6 +266,7 @@ impl Default for LlmProvider {
             rate_limits: None,
             usage: None,
             routing_preferences: None,
+            cluster_name: None,
         }
     }
 }
