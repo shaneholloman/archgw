@@ -4,7 +4,7 @@
 <div align="center">
 
 
-_Arch is a modular edge and LLM proxy server for agents._<br><br>
+_Arch is a smart edge and LLM proxy server for agents._<br><br>
  Arch handles the *pesky low-level work* in building agentic apps — like applying guardrails, clarifying vague user input, routing prompts to the right agent, and unifying access to any LLM. It’s a language and framework friendly infrastructure layer designed to help you build and ship agentic apps faster.
 
 
