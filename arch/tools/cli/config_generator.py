@@ -13,10 +13,10 @@ SUPPORTED_PROVIDERS_WITH_BASE_URL = [
     "ollama",
     "qwen",
     "amazon_bedrock",
+    "arch",
 ]
 
 SUPPORTED_PROVIDERS_WITHOUT_BASE_URL = [
-    "arch",
     "deepseek",
     "groq",
     "mistral",
@@ -303,6 +303,16 @@ def validate_and_render_schema():
                     "model": config_yaml.get("routing", {}).get("model", "Arch-Router"),
                 }
             )
+
+    # Always add arch-function model provider if not already defined
+    if "arch-function" not in model_provider_name_set:
+        updated_model_providers.append(
+            {
+                "name": "arch-function",
+                "provider_interface": "arch",
+                "model": "Arch-Function",
+            }
+        )
 
     config_yaml["model_providers"] = deepcopy(updated_model_providers)
 

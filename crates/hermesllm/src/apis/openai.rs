@@ -101,6 +101,12 @@ pub struct ChatCompletionsRequest {
     pub top_logprobs: Option<u32>,
     pub user: Option<String>,
     // pub web_search: Option<bool>, // GOOD FIRST ISSUE: Future support for web search
+
+    // VLLM-specific parameters (used by Arch-Function)
+    pub top_k: Option<u32>,
+    pub stop_token_ids: Option<Vec<u32>>,
+    pub continue_final_message: Option<bool>,
+    pub add_generation_prompt: Option<bool>,
 }
 
 impl ChatCompletionsRequest {
@@ -385,6 +391,8 @@ pub struct ChatCompletionsResponse {
     pub usage: Usage,
     pub system_fingerprint: Option<String>,
     pub service_tier: Option<String>,
+    // This isn't a standard OpenAI field, but we include it for extensibility
+    pub metadata: Option<HashMap<String, Value>>,
 }
 
 impl Default for ChatCompletionsResponse {
@@ -398,6 +406,7 @@ impl Default for ChatCompletionsResponse {
             usage: Usage::default(),
             system_fingerprint: None,
             service_tier: None,
+            metadata: None,
         }
     }
 }
