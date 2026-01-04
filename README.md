@@ -17,6 +17,7 @@
 [![e2e tests](https://github.com/katanemo/plano/actions/workflows/e2e_tests.yml/badge.svg)](https://github.com/katanemo/plano/actions/workflows/e2e_tests.yml)
 [![Build and Deploy Documentation](https://github.com/katanemo/plano/actions/workflows/static.yml/badge.svg)](https://github.com/katanemo/plano/actions/workflows/static.yml)
 
+Star ⭐️ the repo if you found Plano useful — new releases and updates land here first.
 </div>
 
 # Overview
@@ -188,3 +189,5 @@ Ready to try Plano? Check out our comprehensive documentation:
 
 ## Contribution
 We would love feedback on our [Roadmap](https://github.com/orgs/katanemo/projects/1) and we welcome contributions to **Plano**! Whether you're fixing bugs, adding new features, improving documentation, or creating tutorials, your help is much appreciated. Please visit our [Contribution Guide](CONTRIBUTING.md) for more details
+
+Star ⭐️ the repo if you found Plano useful — new releases and updates land here first.
