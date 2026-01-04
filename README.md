@@ -131,7 +131,7 @@ async def chat(request: Request):
 
 ### 3. Start Plano & Query Your Agents
 
-**Prerequisites:** Please the [prerequisites section](https://docs.planoai.dev/get_started/quickstart.html#prerequisites) in our quickstart guide before using Plano.
+**Prerequisites:** Follow the [prerequisites guide](https://docs.planoai.dev/get_started/quickstart.html#prerequisites) to install Plano and set up your environment.
 
 ```bash
 # Start Plano
