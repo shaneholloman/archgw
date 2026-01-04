@@ -7,7 +7,7 @@
  Plano pulls out the rote plumbing work and decouples you from brittle framework abstractions, centralizing what shouldn’t be bespoke in every codebase - like agent routing and orchestration, rich agentic signals and traces for continuous improvement, guardrail filters for safety and moderation, and smart LLM routing APIs for model agility. Use any language or AI framework, and deliver agents faster to production.
 
 
-[Quickstart](#Quickstart) •
+[Quickstart Guide](https://docs.planoai.dev/get_started/quickstart.html) •
 [Build Agentic Apps with Plano](#Build-Agentic-Apps-with-Plano) •
 [Documentation](https://docs.planoai.dev) •
 [Contact](#Contact)
@@ -46,6 +46,8 @@ Plano pulls rote plumbing out of your framework so you can stay focused on what 
 Plano handles **orchestration, model management, and observability** as modular building blocks - letting you configure only what you need (edge proxying for agentic orchestration and guardrails, or LLM routing from your services, or both together) to fit cleanly into existing architectures. Below is a simple multi-agent travel agent built with Plano that showcases all three core capabilities
 
 > 📁 **Full working code:** See [`demos/use_cases/travel_agents/`](demos/use_cases/travel_agents/) for complete weather and flight agents you can run locally.
+
+
 
 ### 1. Define Your Agents in YAML
 
@@ -128,6 +130,8 @@ async def chat(request: Request):
 ```
 
 ### 3. Start Plano & Query Your Agents
+
+**Prerequisites:** Please the [prerequisites section](https://docs.planoai.dev/get_started/quickstart.html#prerequisites) in our quickstart guide before using Plano.
 
 ```bash
 # Start Plano
