@@ -40,7 +40,7 @@ COPY crates/brightstaff/src    brightstaff/src
 RUN find common hermesllm brightstaff -name "*.rs" -exec touch {} +
 RUN cargo build --release -p brightstaff
 
-FROM docker.io/envoyproxy/envoy:v1.36.4 AS envoy
+FROM docker.io/envoyproxy/envoy:v1.37.0 AS envoy
 
 FROM python:3.13.6-slim AS arch
 
