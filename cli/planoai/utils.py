@@ -154,7 +154,10 @@ def convert_legacy_listeners(
                 )
             listener["model_providers"] = model_providers or []
             model_provider_set = True
-            llm_gateway_listener = listener
+            # Merge user listener values into defaults for the Envoy template
+            llm_gateway_listener = {**llm_gateway_listener, **listener}
+        elif listener.get("type") == "prompt":
+            prompt_gateway_listener = {**prompt_gateway_listener, **listener}
     if not model_provider_set:
         listeners.append(llm_gateway_listener)
 
