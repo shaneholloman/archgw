@@ -46,6 +46,10 @@ jobs:
       - name: Install plano tools
         run: uv sync --extra dev
 
+      - name: Sync CLI templates to demos
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: uv run python -m planoai.template_sync
+
       - name: Run tests
         run: uv run pytest
 
