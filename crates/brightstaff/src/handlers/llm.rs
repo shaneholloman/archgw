@@ -198,6 +198,7 @@ async fn llm_chat_inner(
     let temperature = client_request.get_temperature();
     let is_streaming_request = client_request.is_streaming();
     let alias_resolved_model = resolve_model_alias(&model_from_request, &model_aliases);
+    let (provider_id, _) = get_provider_info(&llm_providers, &alias_resolved_model).await;
 
     // Validate that the requested model exists in configuration
     // This matches the validation in llm_gateway routing.rs
@@ -249,7 +250,11 @@ async fn llm_chat_inner(
     if client_request.remove_metadata_key("plano_preference_config") {
         debug!("removed plano_preference_config from metadata");
     }
-
+    if let Some(ref client_api_kind) = client_api {
+        let upstream_api =
+            provider_id.compatible_api_for_client(client_api_kind, is_streaming_request);
+        client_request.normalize_for_upstream(provider_id, &upstream_api);
+    }
     // === v1/responses state management: Determine upstream API and combine input if needed ===
     // Do this BEFORE routing since routing consumes the request
     // Only process state if state_storage is configured
@@ -496,7 +501,6 @@ async fn llm_chat_inner(
         .into_response()),
     }
 }
-
 /// Resolves model aliases by looking up the requested model in the model_aliases map.
 /// Returns the target model if an alias is found, otherwise returns the original model.
 fn resolve_model_alias(
