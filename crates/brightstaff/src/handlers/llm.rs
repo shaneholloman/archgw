@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use common::configuration::{ModelAlias, SpanAttributes};
+use common::configuration::{FilterPipeline, ModelAlias, SpanAttributes};
 use common::consts::{
     ARCH_IS_STREAMING_HEADER, ARCH_PROVIDER_HINT_HEADER, REQUEST_ID_HEADER, TRACE_PARENT_HEADER,
 };
@@ -8,9 +8,9 @@ use hermesllm::apis::openai_responses::InputParam;
 use hermesllm::clients::{SupportedAPIsFromClient, SupportedUpstreamAPIs};
 use hermesllm::{ProviderRequest, ProviderRequestType};
 use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use hyper::header::{self};
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use opentelemetry::global;
 use opentelemetry::trace::get_active_span;
 use opentelemetry_http::HeaderInjector;
@@ -19,9 +19,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, info_span, warn, Instrument};
 
+use super::pipeline_processor::PipelineProcessor;
+
 use crate::handlers::router_chat::router_chat_get_upstream_model;
-use crate::handlers::utils::{
-    create_streaming_response, truncate_message, ObservableStreamProcessor,
+use crate::handlers::streaming::{
+    create_streaming_response, create_streaming_response_with_output_filter, truncate_message,
+    ObservableStreamProcessor, StreamProcessor,
 };
 use crate::router::llm_router::RouterService;
 use crate::state::response_state_processor::ResponsesStateProcessor;
@@ -34,6 +37,7 @@ use crate::tracing::{
 
 use common::errors::BrightStaffError;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn llm_chat(
     request: Request<hyper::body::Incoming>,
     router_service: Arc<RouterService>,
@@ -42,6 +46,7 @@ pub async fn llm_chat(
     llm_providers: Arc<RwLock<LlmProviders>>,
     span_attributes: Arc<Option<SpanAttributes>>,
     state_storage: Option<Arc<dyn StateStorage>>,
+    filter_pipeline: Arc<FilterPipeline>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     let request_path = request.uri().path().to_string();
     let request_headers = request.headers().clone();
@@ -81,6 +86,7 @@ pub async fn llm_chat(
         request_id,
         request_path,
         request_headers,
+        filter_pipeline,
     )
     .instrument(request_span)
     .await
@@ -98,6 +104,7 @@ async fn llm_chat_inner(
     request_id: String,
     request_path: String,
     mut request_headers: hyper::HeaderMap,
+    filter_pipeline: Arc<FilterPipeline>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     // Set service name for LLM operations
     set_service_name(operation_component::LLM);
@@ -250,6 +257,85 @@ async fn llm_chat_inner(
     if client_request.remove_metadata_key("plano_preference_config") {
         debug!("removed plano_preference_config from metadata");
     }
+
+    // === Input filters processing for model listener ===
+    // Filters receive the raw request bytes and return (possibly modified) raw bytes.
+    // The returned bytes are re-parsed into a ProviderRequestType to continue the request.
+    {
+        if let Some(ref input_chain) = filter_pipeline.input {
+            if !input_chain.is_empty() {
+                debug!(input_filters = ?input_chain.filter_ids, "processing model listener input filters");
+
+                let chain = input_chain.to_agent_filter_chain("model_listener");
+
+                let mut pipeline_processor = PipelineProcessor::default();
+                match pipeline_processor
+                    .process_raw_filter_chain(
+                        &chat_request_bytes,
+                        &chain,
+                        &input_chain.agents,
+                        &request_headers,
+                        &request_path,
+                    )
+                    .await
+                {
+                    Ok(filtered_bytes) => {
+                        match ProviderRequestType::try_from((
+                            &filtered_bytes[..],
+                            &SupportedAPIsFromClient::from_endpoint(request_path.as_str()).unwrap(),
+                        )) {
+                            Ok(updated_request) => {
+                                client_request = updated_request;
+                                info!("input filter chain processed successfully");
+                            }
+                            Err(parse_err) => {
+                                warn!(error = %parse_err, "input filter returned invalid request JSON");
+                                return Ok(BrightStaffError::InvalidRequest(format!(
+                                    "Input filter returned invalid request: {}",
+                                    parse_err
+                                ))
+                                .into_response());
+                            }
+                        }
+                    }
+                    Err(super::pipeline_processor::PipelineError::ClientError {
+                        agent,
+                        status,
+                        body,
+                    }) => {
+                        warn!(
+                            agent = %agent,
+                            status = %status,
+                            body = %body,
+                            "client error from filter chain"
+                        );
+                        let error_json = serde_json::json!({
+                            "error": "FilterChainError",
+                            "agent": agent,
+                            "status": status,
+                            "agent_response": body
+                        });
+                        let mut error_response = Response::new(full(error_json.to_string()));
+                        *error_response.status_mut() =
+                            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                        error_response.headers_mut().insert(
+                            hyper::header::CONTENT_TYPE,
+                            "application/json".parse().unwrap(),
+                        );
+                        return Ok(error_response);
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "filter chain processing failed");
+                        let err_msg = format!("Filter chain processing failed: {}", err);
+                        let mut internal_error = Response::new(full(err_msg));
+                        *internal_error.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        return Ok(internal_error);
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(ref client_api_kind) = client_api {
         let upstream_api =
             provider_id.compatible_api_for_client(client_api_kind, is_streaming_request);
@@ -420,6 +506,18 @@ async fn llm_chat_inner(
         propagator.inject_context(&cx, &mut HeaderInjector(&mut request_headers));
     });
 
+    // Output filters run for any API shape that reaches this handler (e.g. /v1/chat/completions,
+    // /v1/messages, /v1/responses). Brightstaff does inbound translation and llm_gateway does
+    // outbound translation; filters receive raw response bytes and request path.
+    let has_output_filter = filter_pipeline.has_output_filters();
+
+    // Save request headers for output filters (before they're consumed by upstream request)
+    let output_filter_request_headers = if has_output_filter {
+        Some(request_headers.clone())
+    } else {
+        None
+    };
+
     // Capture start time right before sending request to upstream
     let request_start_time = std::time::Instant::now();
     let _request_start_system_time = std::time::SystemTime::now();
@@ -462,20 +560,18 @@ async fn llm_chat_inner(
     );
 
     // === v1/responses state management: Wrap with ResponsesStateProcessor ===
-    // Only wrap if we need to manage state (client is ResponsesAPI AND upstream is NOT ResponsesAPI AND state_storage is configured)
-    let streaming_response = if let (true, false, Some(state_store)) = (
+    // Pick the right processor: state-aware if needed, otherwise base metrics-only.
+    let processor: Box<dyn StreamProcessor> = if let (true, false, Some(state_store)) = (
         should_manage_state,
         original_input_items.is_empty(),
         state_storage,
     ) {
-        // Extract Content-Encoding header to handle decompression for state parsing
         let content_encoding = response_headers
             .get("content-encoding")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Wrap with state management processor to store state after response completes
-        let state_processor = ResponsesStateProcessor::new(
+        Box::new(ResponsesStateProcessor::new(
             base_processor,
             state_store,
             original_input_items,
@@ -485,11 +581,23 @@ async fn llm_chat_inner(
             false, // Not OpenAI upstream since should_manage_state is true
             content_encoding,
             request_id,
-        );
-        create_streaming_response(byte_stream, state_processor, 16)
+        ))
     } else {
-        // Use base processor without state management
-        create_streaming_response(byte_stream, base_processor, 16)
+        Box::new(base_processor)
+    };
+
+    // Apply output filters if configured, then build the streaming response.
+    let streaming_response = if has_output_filter {
+        let output_chain = filter_pipeline.output.as_ref().unwrap().clone();
+        create_streaming_response_with_output_filter(
+            byte_stream,
+            processor,
+            output_chain,
+            output_filter_request_headers.unwrap(),
+            request_path.clone(),
+        )
+    } else {
+        create_streaming_response(byte_stream, processor)
     };
 
     match response.body(streaming_response.body) {
@@ -569,4 +677,10 @@ async fn get_provider_info(
         warn!("No default provider found, falling back to OpenAI");
         (hermesllm::ProviderId::OpenAI, None)
     }
+}
+
+fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
+    Full::new(chunk.into())
+        .map_err(|never| match never {})
+        .boxed()
 }
