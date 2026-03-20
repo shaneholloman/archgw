@@ -2,63 +2,56 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use common::configuration::SpanAttributes;
-use common::errors::BrightStaffError;
-use common::llm_providers::LlmProviders;
 use hermesllm::apis::OpenAIMessage;
 use hermesllm::clients::SupportedAPIsFromClient;
 use hermesllm::providers::request::ProviderRequest;
 use hermesllm::ProviderRequestType;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response};
 use opentelemetry::trace::get_active_span;
-use serde::ser::Error as SerError;
-use tokio::sync::RwLock;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use super::agent_selector::{AgentSelectionError, AgentSelector};
-use super::pipeline_processor::{PipelineError, PipelineProcessor};
-use super::response_handler::ResponseHandler;
-use crate::router::plano_orchestrator::OrchestratorService;
+use super::errors::build_error_chain_response;
+use super::pipeline::{PipelineError, PipelineProcessor};
+use super::selector::{AgentSelectionError, AgentSelector};
+use crate::app_state::AppState;
+use crate::handlers::extract_request_id;
+use crate::handlers::response::ResponseHandler;
 use crate::tracing::{collect_custom_trace_attributes, operation_component, set_service_name};
 
 /// Main errors for agent chat completions
 #[derive(Debug, thiserror::Error)]
 pub enum AgentFilterChainError {
-    #[error("Forwarded error: {0}")]
-    Brightstaff(#[from] BrightStaffError),
     #[error("Agent selection error: {0}")]
     Selection(#[from] AgentSelectionError),
     #[error("Pipeline processing error: {0}")]
     Pipeline(#[from] PipelineError),
+    #[error("Response handling error: {0}")]
+    Response(#[from] common::errors::BrightStaffError),
     #[error("Request parsing error: {0}")]
-    RequestParsing(#[from] serde_json::Error),
+    RequestParsing(String),
     #[error("HTTP error: {0}")]
     Http(#[from] hyper::Error),
+    #[error("Unsupported endpoint: {0}")]
+    UnsupportedEndpoint(String),
+    #[error("No agents configured")]
+    NoAgentsConfigured,
+    #[error("Agent '{0}' not found in configuration")]
+    AgentNotFound(String),
+    #[error("No messages in conversation history")]
+    EmptyHistory,
+    #[error("Agent chain completed without producing a response")]
+    IncompleteChain,
 }
 
 pub async fn agent_chat(
     request: Request<hyper::body::Incoming>,
-    orchestrator_service: Arc<OrchestratorService>,
-    _: String,
-    agents_list: Arc<tokio::sync::RwLock<Option<Vec<common::configuration::Agent>>>>,
-    listeners: Arc<tokio::sync::RwLock<Vec<common::configuration::Listener>>>,
-    span_attributes: Arc<Option<SpanAttributes>>,
-    llm_providers: Arc<RwLock<LlmProviders>>,
+    state: Arc<AppState>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    let request_id = extract_request_id(&request);
     let custom_attrs =
-        collect_custom_trace_attributes(request.headers(), span_attributes.as_ref().as_ref());
-    // Extract request_id from headers or generate a new one
-    let request_id: String = match request
-        .headers()
-        .get(common::consts::REQUEST_ID_HEADER)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
-    {
-        Some(id) => id,
-        None => uuid::Uuid::new_v4().to_string(),
-    };
+        collect_custom_trace_attributes(request.headers(), state.span_attributes.as_ref());
 
     // Create a span with request_id that will be included in all log lines
     let request_span = info_span!(
@@ -74,17 +67,7 @@ pub async fn agent_chat(
         // Set service name for orchestrator operations
         set_service_name(operation_component::ORCHESTRATOR);
 
-        match handle_agent_chat_inner(
-            request,
-            orchestrator_service,
-            agents_list,
-            listeners,
-            llm_providers,
-            request_id,
-            custom_attrs,
-        )
-        .await
-        {
+        match handle_agent_chat_inner(request, state, request_id, custom_attrs).await {
             Ok(response) => Ok(response),
             Err(err) => {
                 // Check if this is a client error from the pipeline that should be cascaded
@@ -101,7 +84,6 @@ pub async fn agent_chat(
                         "client error from agent"
                     );
 
-                    // Create error response with the original status code and body
                     let error_json = serde_json::json!({
                         "error": "ClientError",
                         "agent": agent,
@@ -109,52 +91,19 @@ pub async fn agent_chat(
                         "agent_response": body
                     });
 
-                    let status_code = hyper::StatusCode::from_u16(*status)
-                        .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
-
                     let json_string = error_json.to_string();
-                    return Ok(BrightStaffError::ForwardedError {
-                        status_code,
-                        message: json_string,
-                    }
-                    .into_response());
+                    let mut response =
+                        Response::new(ResponseHandler::create_full_body(json_string));
+                    *response.status_mut() = hyper::StatusCode::from_u16(*status)
+                        .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
+                    response.headers_mut().insert(
+                        hyper::header::CONTENT_TYPE,
+                        hyper::header::HeaderValue::from_static("application/json"),
+                    );
+                    return Ok(response);
                 }
 
-                // Print detailed error information with full error chain for other errors
-                let mut error_chain = Vec::new();
-                let mut current_error: &dyn std::error::Error = &err;
-
-                // Collect the full error chain
-                loop {
-                    error_chain.push(current_error.to_string());
-                    match current_error.source() {
-                        Some(source) => current_error = source,
-                        None => break,
-                    }
-                }
-
-                // Log the complete error chain
-                warn!(error_chain = ?error_chain, "agent chat error chain");
-                warn!(root_error = ?err, "root error");
-
-                // Create structured error response as JSON
-                let error_json = serde_json::json!({
-                    "error": {
-                        "type": "AgentFilterChainError",
-                        "message": err.to_string(),
-                        "error_chain": error_chain,
-                        "debug_info": format!("{:?}", err)
-                    }
-                });
-
-                // Log the error for debugging
-                info!(error = %error_json, "structured error info");
-
-                Ok(BrightStaffError::ForwardedError {
-                    status_code: StatusCode::BAD_REQUEST,
-                    message: error_json.to_string(),
-                }
-                .into_response())
+                build_error_chain_response(&err)
             }
         }
     }
@@ -162,19 +111,22 @@ pub async fn agent_chat(
     .await
 }
 
-async fn handle_agent_chat_inner(
+/// Parsed and validated agent request data.
+struct AgentRequest {
+    client_request: ProviderRequestType,
+    messages: Vec<OpenAIMessage>,
+    request_headers: hyper::HeaderMap,
+    request_id: Option<String>,
+}
+
+/// Parse the incoming HTTP request, resolve the listener, and extract messages.
+async fn parse_agent_request(
     request: Request<hyper::body::Incoming>,
-    orchestrator_service: Arc<OrchestratorService>,
-    agents_list: Arc<tokio::sync::RwLock<Option<Vec<common::configuration::Agent>>>>,
-    listeners: Arc<tokio::sync::RwLock<Vec<common::configuration::Listener>>>,
-    llm_providers: Arc<RwLock<LlmProviders>>,
-    request_id: String,
-    custom_attrs: std::collections::HashMap<String, String>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, AgentFilterChainError> {
-    // Initialize services
-    let agent_selector = AgentSelector::new(orchestrator_service);
-    let mut pipeline_processor = PipelineProcessor::default();
-    let response_handler = ResponseHandler::new();
+    state: &AppState,
+    request_id: &str,
+    custom_attrs: &std::collections::HashMap<String, String>,
+) -> Result<(AgentRequest, common::configuration::Listener, AgentSelector), AgentFilterChainError> {
+    let agent_selector = AgentSelector::new(Arc::clone(&state.orchestrator_service));
 
     // Extract listener name from headers
     let listener_name = request
@@ -183,16 +135,11 @@ async fn handle_agent_chat_inner(
         .and_then(|name| name.to_str().ok());
 
     // Find the appropriate listener
-    let listener: common::configuration::Listener = {
-        let listeners = listeners.read().await;
-        agent_selector
-            .find_listener(listener_name, &listeners)
-            .await?
-    };
+    let listener = agent_selector.find_listener(listener_name, &state.listeners)?;
 
     get_active_span(|span| {
         span.update_name(listener.name.to_string());
-        for (key, value) in &custom_attrs {
+        for (key, value) in custom_attrs {
             span.set_attribute(opentelemetry::KeyValue::new(key.clone(), value.clone()));
         }
     });
@@ -200,24 +147,20 @@ async fn handle_agent_chat_inner(
     info!(listener = %listener.name, "handling request");
 
     // Parse request body
-    let request_path = request
-        .uri()
-        .path()
-        .to_string()
+    let full_path = request.uri().path().to_string();
+    let request_path = full_path
         .strip_prefix("/agents")
-        .unwrap()
+        .unwrap_or(&full_path)
         .to_string();
 
     let request_headers = {
         let mut headers = request.headers().clone();
         headers.remove(common::consts::ENVOY_ORIGINAL_PATH_HEADER);
 
-        // Set the request_id in headers if not already present
         if !headers.contains_key(common::consts::REQUEST_ID_HEADER) {
-            headers.insert(
-                common::consts::REQUEST_ID_HEADER,
-                hyper::header::HeaderValue::from_str(&request_id).unwrap(),
-            );
+            if let Ok(val) = hyper::header::HeaderValue::from_str(request_id) {
+                headers.insert(common::consts::REQUEST_ID_HEADER, val);
+            }
         }
 
         headers
@@ -230,63 +173,62 @@ async fn handle_agent_chat_inner(
         "received request body"
     );
 
-    // Determine the API type from the endpoint
     let api_type =
         SupportedAPIsFromClient::from_endpoint(request_path.as_str()).ok_or_else(|| {
-            let err_msg = format!("Unsupported endpoint: {}", request_path);
-            warn!("{}", err_msg);
-            AgentFilterChainError::RequestParsing(serde_json::Error::custom(err_msg))
+            warn!(path = %request_path, "unsupported endpoint");
+            AgentFilterChainError::UnsupportedEndpoint(request_path.clone())
         })?;
 
-    let mut client_request =
-        match ProviderRequestType::try_from((&chat_request_bytes[..], &api_type)) {
-            Ok(request) => request,
-            Err(err) => {
-                warn!("failed to parse request as ProviderRequestType: {}", err);
-                let err_msg = format!("Failed to parse request: {}", err);
-                return Err(AgentFilterChainError::RequestParsing(
-                    serde_json::Error::custom(err_msg),
-                ));
-            }
-        };
+    let client_request = ProviderRequestType::try_from((&chat_request_bytes[..], &api_type))
+        .map_err(|err| {
+            warn!(error = %err, "failed to parse request as ProviderRequestType");
+            AgentFilterChainError::RequestParsing(format!("Failed to parse request: {}", err))
+        })?;
 
-    // If model is not specified in the request, resolve from default provider
-    if client_request.model().is_empty() {
-        match llm_providers.read().await.default() {
-            Some(default_provider) => {
-                let default_model = default_provider.name.clone();
-                info!(default_model = %default_model, "no model specified in request, using default provider");
-                client_request.set_model(default_model);
-            }
-            None => {
-                let err_msg = "No model specified in request and no default provider configured";
-                warn!("{}", err_msg);
-                return Ok(BrightStaffError::NoModelSpecified.into_response());
-            }
-        }
-    }
-
-    let message: Vec<OpenAIMessage> = client_request.get_messages();
+    let messages: Vec<OpenAIMessage> = client_request.get_messages();
 
     let request_id = request_headers
         .get(common::consts::REQUEST_ID_HEADER)
         .and_then(|val| val.to_str().ok())
         .map(|s| s.to_string());
 
-    // Create agent map for pipeline processing and agent selection
-    let agent_map = {
-        let agents = agents_list.read().await;
-        let agents = agents.as_ref().unwrap();
-        agent_selector.create_agent_map(agents)
-    };
+    Ok((
+        AgentRequest {
+            client_request,
+            messages,
+            request_headers,
+            request_id,
+        },
+        listener,
+        agent_selector,
+    ))
+}
 
-    // Select appropriate agents using arch orchestrator llm model
+/// Select agents via the orchestrator model and record selection metrics.
+async fn select_and_build_agent_map(
+    agent_selector: &AgentSelector,
+    state: &AppState,
+    messages: &[OpenAIMessage],
+    listener: &common::configuration::Listener,
+    request_id: Option<String>,
+) -> Result<
+    (
+        Vec<common::configuration::AgentFilterChain>,
+        std::collections::HashMap<String, common::configuration::Agent>,
+    ),
+    AgentFilterChainError,
+> {
+    let agents = state
+        .agents_list
+        .as_ref()
+        .ok_or(AgentFilterChainError::NoAgentsConfigured)?;
+    let agent_map = agent_selector.create_agent_map(agents);
+
     let selection_start = Instant::now();
     let selected_agents = agent_selector
-        .select_agents(&message, &listener, request_id.clone())
+        .select_agents(messages, listener, request_id)
         .await?;
 
-    // Record selection attributes on the current orchestrator span
     let selection_elapsed_ms = selection_start.elapsed().as_secs_f64() * 1000.0;
     get_active_span(|span| {
         span.set_attribute(opentelemetry::KeyValue::new(
@@ -316,12 +258,25 @@ async fn handle_agent_chat_inner(
         "selected agents for execution"
     );
 
-    // Execute agents sequentially, passing output from one to the next
-    let mut current_messages = message.clone();
+    Ok((selected_agents, agent_map))
+}
+
+/// Execute the agent chain: run each selected agent sequentially, streaming
+/// the final agent's response back to the client.
+async fn execute_agent_chain(
+    selected_agents: &[common::configuration::AgentFilterChain],
+    agent_map: &std::collections::HashMap<String, common::configuration::Agent>,
+    client_request: ProviderRequestType,
+    messages: Vec<OpenAIMessage>,
+    request_headers: &hyper::HeaderMap,
+    custom_attrs: &std::collections::HashMap<String, String>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, AgentFilterChainError> {
+    let mut pipeline_processor = PipelineProcessor::default();
+    let response_handler = ResponseHandler::new();
+    let mut current_messages = messages;
     let agent_count = selected_agents.len();
 
     for (agent_index, selected_agent) in selected_agents.iter().enumerate() {
-        // Get agent name
         let agent_name = selected_agent.id.clone();
         let is_last_agent = agent_index == agent_count - 1;
 
@@ -332,8 +287,6 @@ async fn handle_agent_chat_inner(
             "processing agent"
         );
 
-        // Process input filters — serialize current request as OpenAI chat completions body,
-        // pass raw bytes through each filter, then extract updated messages from the result.
         let chat_history = if selected_agent
             .input_filters
             .as_ref()
@@ -351,8 +304,8 @@ async fn handle_agent_chat_inner(
                 .process_raw_filter_chain(
                     &filter_bytes,
                     selected_agent,
-                    &agent_map,
-                    &request_headers,
+                    agent_map,
+                    request_headers,
                     "/v1/chat/completions",
                 )
                 .await?;
@@ -365,8 +318,9 @@ async fn handle_agent_chat_inner(
             current_messages.clone()
         };
 
-        // Get agent details and invoke
-        let agent = agent_map.get(&agent_name).unwrap();
+        let agent = agent_map
+            .get(&agent_name)
+            .ok_or_else(|| AgentFilterChainError::AgentNotFound(agent_name.clone()))?;
 
         debug!(agent = %agent_name, "invoking agent");
 
@@ -380,7 +334,7 @@ async fn handle_agent_chat_inner(
             set_service_name(operation_component::AGENT);
             get_active_span(|span| {
                 span.update_name(format!("{} /v1/chat/completions", agent_name));
-                for (key, value) in &custom_attrs {
+                for (key, value) in custom_attrs {
                     span.set_attribute(opentelemetry::KeyValue::new(key.clone(), value.clone()));
                 }
             });
@@ -390,28 +344,25 @@ async fn handle_agent_chat_inner(
                     &chat_history,
                     client_request.clone(),
                     agent,
-                    &request_headers,
+                    request_headers,
                 )
                 .await
         }
         .instrument(agent_span.clone())
         .await?;
 
-        // If this is the last agent, return the streaming response
         if is_last_agent {
             info!(
                 agent = %agent_name,
                 "completed agent chain, returning response"
             );
-            // Capture the orchestrator span (parent of the agent span) so it
-            // stays open for the full streaming duration alongside the agent span.
             let orchestrator_span = tracing::Span::current();
             return async {
                 response_handler
                     .create_streaming_response(
                         llm_response,
-                        tracing::Span::current(), // agent span (inner)
-                        orchestrator_span,        // orchestrator span (outer)
+                        tracing::Span::current(),
+                        orchestrator_span,
                     )
                     .await
                     .map_err(AgentFilterChainError::from)
@@ -420,7 +371,6 @@ async fn handle_agent_chat_inner(
             .await;
         }
 
-        // For intermediate agents, collect the full response and pass to next agent
         debug!(agent = %agent_name, "collecting response from intermediate agent");
         let response_text = async { response_handler.collect_full_response(llm_response).await }
             .instrument(agent_span)
@@ -432,11 +382,11 @@ async fn handle_agent_chat_inner(
             "agent completed, passing response to next agent"
         );
 
-        // remove last message and add new one at the end
-        let last_message = current_messages.pop().unwrap();
+        let Some(last_message) = current_messages.pop() else {
+            warn!(agent = %agent_name, "no messages in conversation history");
+            return Err(AgentFilterChainError::EmptyHistory);
+        };
 
-        // Create a new message with the agent's response as assistant message
-        // and add it to the conversation history
         current_messages.push(OpenAIMessage {
             role: hermesllm::apis::openai::Role::Assistant,
             content: Some(hermesllm::apis::openai::MessageContent::Text(response_text)),
@@ -448,6 +398,34 @@ async fn handle_agent_chat_inner(
         current_messages.push(last_message);
     }
 
-    // This should never be reached since we return in the last agent iteration
-    unreachable!("Agent execution loop should have returned a response")
+    Err(AgentFilterChainError::IncompleteChain)
+}
+
+async fn handle_agent_chat_inner(
+    request: Request<hyper::body::Incoming>,
+    state: Arc<AppState>,
+    request_id: String,
+    custom_attrs: std::collections::HashMap<String, String>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, AgentFilterChainError> {
+    let (agent_req, listener, agent_selector) =
+        parse_agent_request(request, &state, &request_id, &custom_attrs).await?;
+
+    let (selected_agents, agent_map) = select_and_build_agent_map(
+        &agent_selector,
+        &state,
+        &agent_req.messages,
+        &listener,
+        agent_req.request_id,
+    )
+    .await?;
+
+    execute_agent_chain(
+        &selected_agents,
+        &agent_map,
+        agent_req.client_request,
+        agent_req.messages,
+        &agent_req.request_headers,
+        &custom_attrs,
+    )
+    .await
 }

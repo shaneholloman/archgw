@@ -12,7 +12,7 @@ use opentelemetry::global;
 use opentelemetry_http::HeaderInjector;
 use tracing::{debug, info, instrument, warn};
 
-use crate::handlers::jsonrpc::{
+use super::jsonrpc::{
     JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JSON_RPC_VERSION,
     MCP_INITIALIZE, MCP_INITIALIZE_NOTIFICATION, TOOL_CALL_METHOD,
 };
@@ -78,12 +78,11 @@ impl PipelineProcessor {
         }
     }
 
-    /// Build common MCP headers for requests
-    fn build_mcp_headers(
-        &self,
+    /// Prepare headers shared by all agent/filter requests: removes
+    /// content-length, injects trace context, sets upstream host and retry.
+    fn build_agent_headers(
         request_headers: &HeaderMap,
         agent_id: &str,
-        session_id: Option<&str>,
     ) -> Result<HeaderMap, PipelineError> {
         let mut headers = request_headers.clone();
         headers.remove(hyper::header::CONTENT_LENGTH);
@@ -104,24 +103,34 @@ impl PipelineProcessor {
 
         headers.insert(
             ENVOY_RETRY_HEADER,
-            hyper::header::HeaderValue::from_str("3").unwrap(),
+            hyper::header::HeaderValue::from_static("3"),
         );
+
+        Ok(headers)
+    }
+
+    /// Build headers for MCP requests (adds Accept, Content-Type, optional session id).
+    fn build_mcp_headers(
+        &self,
+        request_headers: &HeaderMap,
+        agent_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<HeaderMap, PipelineError> {
+        let mut headers = Self::build_agent_headers(request_headers, agent_id)?;
 
         headers.insert(
             "Accept",
             hyper::header::HeaderValue::from_static("application/json, text/event-stream"),
         );
-
         headers.insert(
             "Content-Type",
             hyper::header::HeaderValue::from_static("application/json"),
         );
 
         if let Some(sid) = session_id {
-            headers.insert(
-                "mcp-session-id",
-                hyper::header::HeaderValue::from_str(sid).unwrap(),
-            );
+            if let Ok(val) = hyper::header::HeaderValue::from_str(sid) {
+                headers.insert("mcp-session-id", val);
+            }
         }
 
         Ok(headers)
@@ -243,7 +252,7 @@ impl PipelineProcessor {
         let mcp_session_id = if let Some(session_id) = self.agent_id_session_map.get(&agent.id) {
             session_id.clone()
         } else {
-            let session_id = self.get_new_session_id(&agent.id, request_headers).await;
+            let session_id = self.get_new_session_id(&agent.id, request_headers).await?;
             self.agent_id_session_map
                 .insert(agent.id.clone(), session_id.clone());
             session_id
@@ -394,18 +403,19 @@ impl PipelineProcessor {
         Ok(())
     }
 
-    async fn get_new_session_id(&self, agent_id: &str, request_headers: &HeaderMap) -> String {
+    async fn get_new_session_id(
+        &self,
+        agent_id: &str,
+        request_headers: &HeaderMap,
+    ) -> Result<String, PipelineError> {
         info!("initializing MCP session for agent {}", agent_id);
 
         let initialize_request = self.build_initialize_request();
-        let headers = self
-            .build_mcp_headers(request_headers, agent_id, None)
-            .expect("Failed to build headers for initialization");
+        let headers = self.build_mcp_headers(request_headers, agent_id, None)?;
 
         let response = self
             .send_mcp_request(&initialize_request, &headers, agent_id)
-            .await
-            .expect("Failed to initialize MCP session");
+            .await?;
 
         info!("initialize response status: {}", response.status());
 
@@ -413,8 +423,13 @@ impl PipelineProcessor {
             .headers()
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
-            .expect("No mcp-session-id in response")
-            .to_string();
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                PipelineError::NoContentInResponse(format!(
+                    "No mcp-session-id header in initialize response from agent {}",
+                    agent_id
+                ))
+            })?;
 
         info!(
             "created new MCP session for agent {}: {}",
@@ -423,10 +438,9 @@ impl PipelineProcessor {
 
         // Send initialized notification
         self.send_initialized_notification(agent_id, &session_id, &headers)
-            .await
-            .expect("Failed to send initialized notification");
+            .await?;
 
-        session_id
+        Ok(session_id)
     }
 
     /// Execute a raw bytes filter — POST bytes to agent.url, receive bytes back.
@@ -454,25 +468,7 @@ impl PipelineProcessor {
             span.update_name(format!("execute_raw_filter ({})", agent.id));
         });
 
-        let mut agent_headers = request_headers.clone();
-        agent_headers.remove(hyper::header::CONTENT_LENGTH);
-
-        agent_headers.remove(TRACE_PARENT_HEADER);
-        global::get_text_map_propagator(|propagator| {
-            let cx =
-                tracing_opentelemetry::OpenTelemetrySpanExt::context(&tracing::Span::current());
-            propagator.inject_context(&cx, &mut HeaderInjector(&mut agent_headers));
-        });
-
-        agent_headers.insert(
-            ARCH_UPSTREAM_HOST_HEADER,
-            hyper::header::HeaderValue::from_str(&agent.id)
-                .map_err(|_| PipelineError::AgentNotFound(agent.id.clone()))?,
-        );
-        agent_headers.insert(
-            ENVOY_RETRY_HEADER,
-            hyper::header::HeaderValue::from_str("3").unwrap(),
-        );
+        let mut agent_headers = Self::build_agent_headers(request_headers, &agent.id)?;
         agent_headers.insert(
             "Accept",
             hyper::header::HeaderValue::from_static("application/json"),
@@ -578,36 +574,15 @@ impl PipelineProcessor {
         terminal_agent: &Agent,
         request_headers: &HeaderMap,
     ) -> Result<reqwest::Response, PipelineError> {
-        // let mut request = original_request.clone();
         original_request.set_messages(messages);
 
         let request_url = "/v1/chat/completions";
 
-        let request_body = ProviderRequestType::to_bytes(&original_request).unwrap();
-        // let request_body = serde_json::to_string(&request)?;
+        let request_body = ProviderRequestType::to_bytes(&original_request)
+            .map_err(|e| PipelineError::NoContentInResponse(e.to_string()))?;
         debug!("sending request to terminal agent {}", terminal_agent.id);
 
-        let mut agent_headers = request_headers.clone();
-        agent_headers.remove(hyper::header::CONTENT_LENGTH);
-
-        // Inject OpenTelemetry trace context automatically
-        agent_headers.remove(TRACE_PARENT_HEADER);
-        global::get_text_map_propagator(|propagator| {
-            let cx =
-                tracing_opentelemetry::OpenTelemetrySpanExt::context(&tracing::Span::current());
-            propagator.inject_context(&cx, &mut HeaderInjector(&mut agent_headers));
-        });
-
-        agent_headers.insert(
-            ARCH_UPSTREAM_HOST_HEADER,
-            hyper::header::HeaderValue::from_str(&terminal_agent.id)
-                .map_err(|_| PipelineError::AgentNotFound(terminal_agent.id.clone()))?,
-        );
-
-        agent_headers.insert(
-            ENVOY_RETRY_HEADER,
-            hyper::header::HeaderValue::from_str("3").unwrap(),
-        );
+        let agent_headers = Self::build_agent_headers(request_headers, &terminal_agent.id)?;
 
         let response = self
             .client
