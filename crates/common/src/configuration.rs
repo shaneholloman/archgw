@@ -104,6 +104,57 @@ pub enum StateStorageType {
     Postgres,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectionPreference {
+    Cheapest,
+    Fastest,
+    /// Return models in the same order they were defined — no reordering.
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectionPolicy {
+    pub prefer: SelectionPreference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopLevelRoutingPreference {
+    pub name: String,
+    pub description: String,
+    pub models: Vec<String>,
+    pub selection_policy: SelectionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsAuth {
+    #[serde(rename = "type")]
+    pub auth_type: String, // only "bearer" supported
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MetricsSource {
+    CostMetrics {
+        url: String,
+        refresh_interval: Option<u64>,
+        auth: Option<MetricsAuth>,
+    },
+    PrometheusMetrics {
+        url: String,
+        query: String,
+        refresh_interval: Option<u64>,
+    },
+    #[serde(rename = "digitalocean_pricing")]
+    DigitalOceanPricing {
+        refresh_interval: Option<u64>,
+        /// Map DO catalog keys (`lowercase(creator)/model_id`) to Plano model names.
+        /// Example: `openai/openai-gpt-oss-120b: openai/gpt-4o`
+        model_aliases: Option<HashMap<String, String>>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     pub version: String,
@@ -122,6 +173,8 @@ pub struct Configuration {
     pub filters: Option<Vec<Agent>>,
     pub listeners: Vec<Listener>,
     pub state_storage: Option<StateStorageConfig>,
+    pub routing_preferences: Option<Vec<TopLevelRoutingPreference>>,
+    pub model_metrics_sources: Option<Vec<MetricsSource>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -237,6 +290,8 @@ pub enum TimeUnit {
     Minute,
     #[serde(rename = "hour")]
     Hour,
+    #[serde(rename = "day")]
+    Day,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -318,18 +373,6 @@ impl LlmProviderType {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ModelUsagePreference {
-    pub model: String,
-    pub routing_preferences: Vec<RoutingPreference>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutingPreference {
-    pub name: String,
-    pub description: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 pub struct AgentUsagePreference {
     pub model: String,
     pub orchestration_preferences: Vec<OrchestrationPreference>,
@@ -378,7 +421,6 @@ pub struct LlmProvider {
     pub port: Option<u16>,
     pub rate_limits: Option<LlmRatelimit>,
     pub usage: Option<String>,
-    pub routing_preferences: Option<Vec<RoutingPreference>>,
     pub cluster_name: Option<String>,
     pub base_url_path_prefix: Option<String>,
     pub internal: Option<bool>,
@@ -422,7 +464,6 @@ impl Default for LlmProvider {
             port: None,
             rate_limits: None,
             usage: None,
-            routing_preferences: None,
             cluster_name: None,
             base_url_path_prefix: None,
             internal: None,
