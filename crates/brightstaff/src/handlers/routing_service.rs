@@ -197,6 +197,7 @@ async fn routing_decision_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::configuration::SelectionPreference;
 
     fn make_chat_body(extra_fields: &str) -> Vec<u8> {
         let extra = if extra_fields.is_empty() {
@@ -262,6 +263,61 @@ mod tests {
         assert_eq!(cleaned_json["temperature"], 0.5);
         assert_eq!(cleaned_json["max_tokens"], 100);
         assert!(cleaned_json.get("routing_preferences").is_none());
+    }
+
+    #[test]
+    fn extract_routing_policy_prefer_null_defaults_to_none() {
+        let policy = r#""routing_preferences": [
+            {
+                "name": "coding",
+                "description": "code generation, writing functions, debugging",
+                "models": ["openai/gpt-4o", "openai/gpt-4o-mini"],
+                "selection_policy": {"prefer": null}
+            }
+        ]"#;
+        let body = make_chat_body(policy);
+        let (_cleaned, prefs) = extract_routing_policy(&body).unwrap();
+
+        let prefs = prefs.expect("should parse routing_preferences when prefer is null");
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].selection_policy.prefer, SelectionPreference::None);
+    }
+
+    #[test]
+    fn extract_routing_policy_selection_policy_missing_defaults_to_none() {
+        let policy = r#""routing_preferences": [
+            {
+                "name": "coding",
+                "description": "code generation, writing functions, debugging",
+                "models": ["openai/gpt-4o", "openai/gpt-4o-mini"]
+            }
+        ]"#;
+        let body = make_chat_body(policy);
+        let (_cleaned, prefs) = extract_routing_policy(&body).unwrap();
+
+        let prefs =
+            prefs.expect("should parse routing_preferences when selection_policy is missing");
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].selection_policy.prefer, SelectionPreference::None);
+    }
+
+    #[test]
+    fn extract_routing_policy_prefer_empty_string_defaults_to_none() {
+        let policy = r#""routing_preferences": [
+            {
+                "name": "coding",
+                "description": "code generation, writing functions, debugging",
+                "models": ["openai/gpt-4o", "openai/gpt-4o-mini"],
+                "selection_policy": {"prefer": ""}
+            }
+        ]"#;
+        let body = make_chat_body(policy);
+        let (_cleaned, prefs) = extract_routing_policy(&body).unwrap();
+
+        let prefs =
+            prefs.expect("should parse routing_preferences when selection_policy.prefer is empty");
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].selection_policy.prefer, SelectionPreference::None);
     }
 
     #[test]
