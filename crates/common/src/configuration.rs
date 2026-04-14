@@ -7,12 +7,32 @@ use crate::api::open_ai::{
     ChatCompletionTool, FunctionDefinition, FunctionParameter, FunctionParameters, ParameterType,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionCacheType {
+    #[default]
+    Memory,
+    Redis,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCacheConfig {
+    #[serde(rename = "type", default)]
+    pub cache_type: SessionCacheType,
+    /// Redis URL, e.g. `redis://localhost:6379`. Required when `type` is `redis`.
+    pub url: Option<String>,
+    /// Optional HTTP header name whose value is used as a tenant prefix in the cache key.
+    /// When set, keys are scoped as `plano:affinity:{tenant_id}:{session_id}`.
+    pub tenant_header: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Routing {
     pub llm_provider: Option<String>,
     pub model: Option<String>,
     pub session_ttl_seconds: Option<u64>,
     pub session_max_entries: Option<usize>,
+    pub session_cache: Option<SessionCacheConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

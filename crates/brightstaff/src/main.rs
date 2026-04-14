@@ -8,6 +8,7 @@ use brightstaff::handlers::routing_service::routing_decision;
 use brightstaff::router::llm::RouterService;
 use brightstaff::router::model_metrics::ModelMetricsService;
 use brightstaff::router::orchestrator::OrchestratorService;
+use brightstaff::session_cache::init_session_cache;
 use brightstaff::state::memory::MemoryConversationalStorage;
 use brightstaff::state::postgresql::PostgreSQLConversationStorage;
 use brightstaff::state::StateStorage;
@@ -175,7 +176,7 @@ async fn init_app_state(
         .unwrap_or_else(|| DEFAULT_ROUTING_LLM_PROVIDER.to_string());
 
     let session_ttl_seconds = config.routing.as_ref().and_then(|r| r.session_ttl_seconds);
-    let session_max_entries = config.routing.as_ref().and_then(|r| r.session_max_entries);
+    let session_cache = init_session_cache(config).await?;
 
     // Validate that top-level routing_preferences requires v0.4.0+.
     let config_version = parse_semver(&config.version);
@@ -297,6 +298,12 @@ async fn init_app_state(
         }
     }
 
+    let session_tenant_header = config
+        .routing
+        .as_ref()
+        .and_then(|r| r.session_cache.as_ref())
+        .and_then(|c| c.tenant_header.clone());
+
     let router_service = Arc::new(RouterService::new(
         config.routing_preferences.clone(),
         metrics_service,
@@ -304,20 +311,9 @@ async fn init_app_state(
         routing_model_name,
         routing_llm_provider,
         session_ttl_seconds,
-        session_max_entries,
+        session_cache,
+        session_tenant_header,
     ));
-
-    // Spawn background task to clean up expired session cache entries every 5 minutes
-    {
-        let router_service = Arc::clone(&router_service);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                router_service.cleanup_expired_sessions().await;
-            }
-        });
-    }
 
     let orchestrator_model_name: String = overrides
         .agent_orchestration_model
