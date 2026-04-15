@@ -233,6 +233,7 @@ pub struct Overrides {
     pub use_agent_orchestrator: Option<bool>,
     pub llm_routing_model: Option<String>,
     pub agent_orchestration_model: Option<String>,
+    pub orchestrator_model_context_length: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -730,13 +731,6 @@ mod test {
                 ..Default::default()
             },
             LlmProvider {
-                name: "arch-router".to_string(),
-                provider_interface: LlmProviderType::Plano,
-                model: Some("Arch-Router".to_string()),
-                internal: Some(true),
-                ..Default::default()
-            },
-            LlmProvider {
                 name: "plano-orchestrator".to_string(),
                 provider_interface: LlmProviderType::Plano,
                 model: Some("Plano-Orchestrator".to_string()),
@@ -747,13 +741,10 @@ mod test {
 
         let models = providers.into_models();
 
-        // Should only have 1 model: openai-gpt4
         assert_eq!(models.data.len(), 1);
 
-        // Verify internal models are excluded from /v1/models
         let model_ids: Vec<String> = models.data.iter().map(|m| m.id.clone()).collect();
         assert!(model_ids.contains(&"openai-gpt4".to_string()));
-        assert!(!model_ids.contains(&"arch-router".to_string()));
         assert!(!model_ids.contains(&"plano-orchestrator".to_string()));
     }
 }
